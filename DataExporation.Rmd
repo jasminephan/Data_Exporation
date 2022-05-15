@@ -1,0 +1,129 @@
+---
+title: "Data Exploration Project"
+author: "Jasmine P"
+date: "2022-05-1"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(lubridate)
+library(car)
+library(jtools)
+library(tidyr)
+library(purrr)
+library(haven)
+library(stringr)
+library(fixest)
+```
+
+## Reading in the Google Trends data
+
+```{r}
+ggtrend <- list.files(path = "Lab3_Rawdata", pattern = "trends_up_to_",full.names = TRUE) %>% map_df(read_csv)
+```
+
+
+## Aggregating the Google Trends data
+```{r}
+# Getting date data
+ggtrend <- ggtrend %>%
+  mutate(date = ymd(str_sub(monthorweek,1,10)))
+# Aggregating
+ggtrend_grouped <- ggtrend %>%
+  group_by(schname,keyword) %>%
+  mutate(index_sd = (index - mean(index, na.rm = TRUE))/ sd(index,na.rm = TRUE)) %>%
+  group_by (date = floor_date(date, "month")) 
+```
+
+## Reading in the Scorecard data
+```{r}
+data <- read.csv("Lab3_Rawdata/Most+Recent+Cohorts+(Scorecard+Elements).csv")
+id_name_link <- read.csv("Lab3_Rawdata/id_name_link.csv")
+```
+
+## Merge in the Scorecard data
+```{r}
+# Get rid of school names that show up more than once
+id_name_link <- id_name_link %>%
+  group_by(schname) %>%
+  mutate(N = n()) %>%
+  filter(N == 1)
+# Join ggtrend to id_name_link 
+trendID <- id_name_link %>%
+  left_join(ggtrend_grouped, by = 'schname')
+# Join unitid and opeid
+names(trendID)[names(trendID)=='unitid'] <- 'UNITID'
+names(trendID)[names(trendID)=='opeid'] <- 'OPEID'
+trendScore <- trendID %>%
+  inner_join(data, by = c('UNITID' = 'UNITID','OPEID' = 'OPEID'))
+```
+
+## The Analysis
+
+The goal of this analysis is to answer the research question: Among colleges that predominantly grant bachelor's degrees, did the release of the Scorecard shift student interest to high-earnings colleges relative to low-earnings ones (as proxied by Google searches for keywords associated with those colleges)?
+
+There is a variable in the Scorecard with information about the median earnings of graduates ten years after graduation for each college. According to askwonder.com, the average salary for individuals with five to nine years of experience is $63,235. 
+We can define "high-earning" and "low-earning" colleges by creating a binary variable for earning above and below $60k(High - Low).
+
+After cleaning, these are the variables used in this analysis:
+1. Date
+2. ID
+3. Median earnings of students
+4. High/Low earnings
+5. Standardized trending index
+
+```{r}
+# Convert the earnings to numeric
+trendScore$md_earn_wne_p10.REPORTED.EARNINGS = as.numeric(as.character(trendScore$md_earn_wne_p10.REPORTED.EARNINGS))
+# Create binary variables for High/Low income
+trendScore$Earnings <- ifelse(trendScore$md_earn_wne_p10.REPORTED.EARNINGS >= 60000, "High", "Low")
+# Filter out the colleges that predominantly grant bachelor's degrees
+trendScore <- trendScore %>% filter(PREDDEG == 3 , na.rm = TRUE)
+#Keep only necessary columns
+trendScore_rec <- trendScore %>% 
+  select(UNITID, OPEID, schname,keyword, date,md_earn_wne_p10.REPORTED.EARNINGS,Earnings, index_sd)
+# Remove missing values
+trendScore_rec <- drop_na(trendScore_rec)
+```
+
+To analyze the relationship between the release of Scorecard and student interest, I run a regression. The treated group is the universities that median income after 6 years of graduation is high, the control group is universities that median income after 6 years of graduation is high. The release of Scorecard is the treatment. 
+
+Based on the p-value, we reject the null hypothesis that there’s no difference between the treated group and control group after the treatment went into effect. We can assume that there’s no statistically significant evidence that the the treated and control group had the same search level in the post-treatment period.
+
+```{r}
+#Create treatment group and control group. The date is set as "2015-10-01" since Scorecard was released on September 15th 2015. 
+
+trendScore_rec <- trendScore_rec %>% 
+  mutate(treated = md_earn_wne_p10.REPORTED.EARNINGS >= 60000, post_treatment = date >= as.Date("2015-10-01"))
+
+#Build regression
+reg <- feols(index_sd ~treated* post_treatment, data = trendScore_rec)
+etable(reg)
+```
+
+To further answer the research question, I created a line chart. This chart is divided into two period, separating by the vertical line. From the vertical line is the post treatment, where Scorecard was released.
+
+Looking at the line graph, we can see a similar in trend of the two groups(high and low earning) pre-treatment period. After the treatment went into effect, the search index for universities with “high earning” significant increased while the search for “low earning” universities did not change.
+
+Note that the Scorecard was first published in September 2015. Most universities in the United States began their academic years in September. Beginning in January 2016, the search for "high-earning" institutions exploded. This indicates that when students started looking for schools for the new academic year, they looked for "high-earning" institutions more than "low-earning" ones.
+
+
+```{r pressure, echo=FALSE}
+
+#Dual line plot using un-dummy variable
+ggplot(trendScore_rec, aes(date, index_sd, color = Earnings)) +
+  stat_summary(geom = 'line') +
+  labs(title = 'Search index between high and low earning universities post- and pre-treatment', x = 'Year', y = 'Standardized Index') +
+  geom_vline(xintercept = as.Date ("2015-10-01")) +
+  theme_minimal()
+```
+
+The release of Scorecard led people to search more often for “high-earning” universities. People began looking for "high-earning" institutions after the introduction of Scorecard. However, there isn't much of a shift in the way people search. The Scorecard had just a little impact on search trends and aggregated search activity.
